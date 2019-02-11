@@ -1,0 +1,96 @@
+---
+title: "Desafío Seguros"
+output: html_notebook
+author: "Javier Saavedra Rubilar"
+---
+
+## Consideraciones entregadas por el negocio:
+### 1. Es 5 veces peor clasificar un cliente como bueno cuando es malo, que malo cuando es bueno
+### 2. Las tarifas telefónicas son altas en el país de donde provienen los clientes de este banco
+### 3. Hay una alta tasa de migración en el país de donde provienen los clientes de este banco
+
+## Cargar librerías
+```{r}
+library(tidyverse)
+library(rpart)
+library(rpart.plot)
+library(caret)
+```
+
+## Cargar data
+```{r}
+data_raw <- read.table("data_desafio_seguros", header = TRUE, sep = ",")
+column_names <- c('id_row','estado_cta_corriente','duracion_meses','historia_cred','prop_cred','monto_cred','ahorros_cuenta','tiempo_empleo_actual'
+                  ,'tasa_plazo_renta_disp','estatus_sexo','otros_deud_garan','tiempo_residencia','posesiones','edad','otros_pagos_pend'
+                  ,'forma_vive','n_creditos_existentes','tipo_trabajo','n_personas_responsable','tiene_telefono','extranjero','clasificacion')
+colnames(data_raw) <- column_names
+data_raw$clasificacion <- ifelse(data_raw$clasificacion == 1, 1, 0)
+data <- data_raw
+```
+
+## Resumen de atributos
+```{r}
+summary(data)
+```
+
+## Dividiendo el dataset en train y test
+```{r}
+set.seed(2)
+sample_size <- floor(0.70*nrow(data))
+train_ind <- sample(seq_len(nrow(data)), size = sample_size, replace = F)
+train <- data[train_ind, ]
+test <- data[-train_ind, ]
+```
+
+## Definiendo el clasificador.
+### Se agrega una matriz de penalidades para cumplir la siguiente definición de negocio:"Es 5 veces peor clasificar un cliente como bueno cuando es malo, que malo cuando es bueno"
+```{r}
+set.seed(2)
+
+positiveWeight = 1.0 / (nrow(subset(train, clasificacion == 0)) / nrow(train))
+negativeWeight = 1.0 / (nrow(subset(train, clasificacion == 1)) / nrow(train))
+
+modelWeights <- ifelse(train$clasificacion == 0, positiveWeight, negativeWeight)
+
+penalty_matrix <- matrix(c(0,1,5,0), byrow=TRUE, nrow=2)
+
+control_rpart <- rpart.control(cp = 0)
+tree <- rpart(data = as.data.frame(train[-c(1:2)]), formula = clasificacion ~ .
+  # , control = control_rpart
+  , method = "anova"
+  , parms = list(loss = penalty_matrix)
+  # , weights = modelWeights
+  )
+rpart.plot(tree)
+printcp(tree)
+plotcp(tree)
+```
+
+## Se hace "prune" al árbol para determinar el nivel óptimo de complejidad
+```{r}
+best_cp <- tree$cptable[which.min(tree$cptable[,"xerror"]), "CP"]
+tree_pruned <- prune(tree, cp = best_cp)
+rpart.plot(tree_pruned)
+printcp(tree_pruned)
+plotcp(tree_pruned)
+```
+
+## Se define un threshold para determinar como se clasifican según la probabilidad de de ser clasificado como "bueno" o "malo". Al hacer esto se genera un trade-off entre sensibilidad y especificidad del modelo. Para el escenario propuesto se recomienda un threshold bajo, aunque signifique clasificar de forma incorrecta a las personas que no presentan un riesgo.
+```{r}
+model_predict <- predict(tree, newdata = test[-c(1:2)])
+threshold <- 0.3
+thrs_predictions <- ifelse(model_predict >= threshold, 1, 0)
+conf_mat <- table(test$clasificacion, thrs_predictions)
+conf_matrix <- confusionMatrix(conf_mat,positive = levels(as.factor(test$clasificacion))[2], mode = "everything")
+conf_mat
+
+
+```
+
+
+```{r}
+library(pROC)
+plot(roc(test$clasificacion, model_predict, direction="<"),
+     col="blue", lwd=3, main="Curva ROC")
+```
+
