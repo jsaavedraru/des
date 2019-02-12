@@ -1,0 +1,150 @@
+## Consideraciones entregadas por el negocio:
+### 1. Es 5 veces peor clasificar un cliente como bueno cuando es malo, que malo cuando es bueno
+### 2. Las tarifas telefónicas son altas en el pais de donde provienen los clientes de este banco
+### 3. Hay una alta tasa de migración en el pais de donde provienen los clientes de este banco
+
+```{r}
+library(tidyverse)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(ggplot2)
+library(pROC)
+library(ROCR)
+```
+
+## Cargar data
+### Se cambian nombres de columnas para mayor comodidad y se cambia la clasificación por 0: "bueno", 1: "malo"
+```{r}
+data_raw <- read.table("data_desafio_seguros", header = TRUE, sep = ",")
+column_names <- c('id_row','estado_cta_corriente','duracion_meses','historia_cred','prop_cred','monto_cred','ahorros_cuenta','tiempo_empleo_actual'
+                  ,'tasa_plazo_renta_disp','estatus_sexo','otros_deud_garan','tiempo_residencia','posesiones','edad','otros_pagos_pend'
+                  ,'forma_vive','n_creditos_existentes','tipo_trabajo','n_personas_responsable','tiene_telefono','extranjero','clasificacion')
+colnames(data_raw) <- column_names
+data_raw$clasificacion <- ifelse(data_raw$clasificacion == 1, 0, 1)
+
+# data_aux <- data_raw %>% mutate(tiene_cta_corriente = ifelse(estado_cta_corriente %in% c('A14'), 0, 1)
+#                                 ,cuenta_critica = ifelse(historia_cred %in% c('A34'), 1, 0)
+#                                 ,ahorros_en_cta = ifelse(ahorros_cuenta %in% c('A65'), 0, 1)
+#                                 ,emp_mayor_al_año = ifelse(tiempo_empleo_actual %in% c('A71','A72'), 0, 1)
+#                                 ,tiene_pagos_pendientes = ifelse(otros_pagos_pend %in% c('A143'), 0, 1)
+#                                 ,credito_por_bien = ifelse(prop_cred %in% c('A40','A41','A42','A43','A44'), 1, 0)
+#                                 ,tiene_fono = ifelse(tiene_telefono == 'A192', 1, 0)
+#                                 )
+
+# data <- data_aux %>% select(tiene_cta_corriente, cuenta_critica, ahorros_en_cta, emp_mayor_al_año, tiene_pagos_pendientes, credito_por_bien
+#                             , tiene_fono, duracion_meses, monto_cred, tasa_plazo_renta_disp, tiempo_residencia, edad, n_creditos_existentes
+#                             , n_personas_responsable, clasificacion
+#                             )
+
+# data_raw$clasificacion <- as.factor(data_raw$clasificacion)
+# data <- data_raw %>% mutate_if(is.numeric, funs(as.numeric(scale(.))))
+data <- data_raw
+```
+
+### Resumen de dataset
+```{r}
+summary(data)
+```
+
+## Dividiendo el dataset en train y test set
+### Se ocupa un 70% del dataset para entrenar y un 30% para validar.
+```{r}
+set.seed(2)
+sample_size <- floor(0.7*nrow(data))
+train_ind <- sample(seq_len(nrow(data)), size = sample_size, replace = F)
+train <- data[train_ind, ]
+test <- data[-train_ind, ]
+```
+
+## Modelo
+### El modelo elegido es de regresión lógistica debido a la naturaleza del output que estamos buscando (probabilidad de ser un cliente "malo", entre 0 - 1). Usamos train[-1] para no tomar en cuenta la variable id_row
+```{r}
+glm_model <- glm(formula = clasificacion ~., data = train[-1], family = binomial(link = 'logit'))
+summary(glm_model)
+```
+
+### Distribución de probabilidad en el set de validación
+```{r}
+preds = predict(glm_model , newdata = test[-1] , type = 'response')
+
+ggplot(data.frame(preds) , aes(preds)) + 
+        geom_density(fill = 'lightgreen' , alpha = 0.3) +
+        labs(x = 'Probabilidad de predicción del set de validación')
+```
+
+## Métricas
+### Se calculan métricas (precision y recall) para distintos thresholds, con la finalidad de elegir un valor que maximice el recall. Esto con el fin de cumplir la regla de negocio "Es 5 veces peor clasificar un cliente como bueno cuando es malo, que malo cuando es bueno""
+```{r}
+k = 0
+accuracy = c()
+precision = c()
+recall = c()
+for(i in seq(from = 0.1 , to = 0.5 , by = 0.01)){
+        k = k + 1
+        preds_binomial = ifelse(preds > i , 1 , 0)
+        confmat = table(test$clasificacion , preds_binomial)
+        accuracy[k] = sum(diag(confmat)) / sum(confmat)
+        precision[k] = confmat[2 , 2] / sum(confmat[ , 2])
+        recall[k] = confmat[2 , 2] / sum(confmat[2 , ])
+}
+```
+
+
+### Se genera dataframe para posterior visualización
+```{r}
+threshold = seq(from = 0.1 , to = 0.5 , by = 0.01)
+
+data_thresh = data.frame(threshold , accuracy , precision , recall)
+head(data_thresh,10)
+```
+
+
+## Trade-off entre precision y recall
+```{r}
+ggplot(gather(data_thresh , key = 'Metric' , value = 'Value' , 2:4) , 
+       aes(x = threshold , y = Value , color = Metric)) + 
+        geom_line(size = 1.5)
+```
+
+## Curva ROC
+### Se elige 0.2 como el threshold óptimo para cumplir con las definiciones del negocio.
+```{r}
+# plot.roc(test$clasificacion , preds , main = "Intervalo de confianza del threshold" , percent = TRUE , 
+#          ci = TRUE , of = "thresholds" , thresholds = "best" , print.thres = "best" , col = 'blue')
+
+ROCRpred <- prediction(preds, test$clasificacion)
+ROCRperf <- performance(ROCRpred, 'prec', 'rec')
+plot(ROCRperf, colorize = TRUE, text.adj = c(-0.2, 1.7))
+```
+
+## Matriz de confusión
+### Precision ~ 50% y recall ~ 82,5%
+```{r}
+final_threshold <- 0.2
+
+preds_for_best = ifelse(preds > final_threshold , 1 , 0)
+confusion_matrix_best = table(Real = test$clasificacion, Prediccion = preds_for_best)
+confusion_matrix_best
+```
+
+## Cargando data de validación
+```{r}
+data_validacion <- read.csv("data_validacion_sin_clasificacion_banco.csv", header = TRUE, sep = ",")
+column_names_val <- c('id_row','estado_cta_corriente','duracion_meses','historia_cred','prop_cred','monto_cred','ahorros_cuenta','tiempo_empleo_actual'
+                  ,'tasa_plazo_renta_disp','estatus_sexo','otros_deud_garan','tiempo_residencia','posesiones','edad','otros_pagos_pend'
+                  ,'forma_vive','n_creditos_existentes','tipo_trabajo','n_personas_responsable','tiene_telefono','extranjero')
+colnames(data_validacion) <- column_names_val
+```
+
+## Generando predicción y escribiendo csv final
+```{r}
+pred_val <- predict(glm_model , newdata = data_validacion[-1] , type = 'response')
+pred_val_clasificacion <- ifelse(pred_val > final_threshold, 2, 1)
+
+entregable <- as.data.frame(cbind(data_validacion$id_row, pred_val_clasificacion))
+colnames(entregable) <- c('row_id', 'predicciones')
+
+write.csv(entregable, file = 'entregable_jsaavedra.csv', row.names = FALSE)
+```
+
